@@ -2,6 +2,8 @@
 
 In this project you find the css code and instructions for a font style that is very close to the original one from the movie Matrix.
 
+![Matrix Code Rain CSS](matrix-code-rain.png)
+
 Be aware, that this project only contains the styling, so don't expect code raining down in your browser :-)
 
 The project consists of a css file, an html5 file and a fonts folder. Due to the copyright you need to download the original Matrix font yourself. See the next section how to do this.
