@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matrix Rain</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Mono:wght@400;700&display=swap');
+  @import url('https://fonts.cdnfonts.com/css/matrix');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #000;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  canvas {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+  }
+</style>
+</head>
+<body>
+<canvas id="matrix"></canvas>
+<script>
+// ── URL Settings ──────────────────────────────────────────────
+// Add ?debug to the URL to show red outlines around the "MATRIX" text
+// Add ?density=2 to the URL for more columns of rain (default: 1)
+var params = new URLSearchParams(window.location.search);
+var showDebugOutlines = params.has('debug');
+var columnDensity = parseFloat(params.get('density')) || 1;
+
+// ── Canvas Setup ──────────────────────────────────────────────
+var canvas = document.getElementById('matrix');
+var ctx = canvas.getContext('2d');
+
+var FONT_SIZE = 18;
+var FONT = FONT_SIZE + 'px "Noto Sans Mono", "MS Gothic", monospace';
+
+// Characters used in the rain: katakana + latin + digits + box-drawing
+var CHARACTERS =
+  'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン' +
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZ' +
+  '0123456789' +
+  '¦╌╎═│┃┆┇┊┋';
+
+// ── Column Data ───────────────────────────────────────────────
+// Each column of falling rain is stored as one object in this array.
+// This replaces the original design of 5 separate parallel arrays,
+// making it much easier to see what data belongs together.
+var columns = [];
+
+function createColumn() {
+  return {
+    position: Math.random() * -100,        // vertical position (negative = waiting above screen)
+    speed: 0.08 + Math.random() * 0.22,    // how fast this column falls
+    brightness: 0.5 + Math.random() * 0.5, // how bright the green characters are
+    lastGridRow: -999,                      // tracks the last row we drew, so we only draw once per row
+    trail: []                               // characters that linger on the "MATRIX" text
+  };
+}
+
+// ── "MATRIX" Text Mask ───────────────────────────────────────
+// We draw the word "MATRIX" on a hidden (offscreen) canvas, then check
+// which grid cells overlap with it. Rain that falls on those cells
+// glows brighter and lingers, gradually revealing the word.
+var hiddenCanvas = document.createElement('canvas');
+var hiddenCtx = hiddenCanvas.getContext('2d');
+var textMask = null; // a flat array of 0s and 1s (1 = this cell is inside the text)
+var maskCols = 0;
+var maskRows = 0;
+
+function buildTextMask() {
+  hiddenCanvas.width = canvas.width;
+  hiddenCanvas.height = canvas.height;
+  hiddenCtx.clearRect(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+
+  // Draw "MATRIX" big and centered on the hidden canvas
+  var fontSize = Math.min(canvas.width / 4, canvas.height / 2.5);
+  hiddenCtx.font = fontSize + 'px "Matrix", "Noto Sans Mono", monospace';
+  hiddenCtx.textAlign = 'center';
+  hiddenCtx.textBaseline = 'middle';
+  hiddenCtx.fillStyle = '#fff';
+  hiddenCtx.fillText('MATRIX', canvas.width / 2, canvas.height / 2);
+
+  // Figure out how many grid cells fit on screen
+  maskCols = Math.ceil(canvas.width / FONT_SIZE);
+  maskRows = Math.ceil(canvas.height / FONT_SIZE);
+  textMask = new Uint8Array(maskCols * maskRows);
+
+  // Read the pixel data from the hidden canvas
+  var imageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+  var pixels = imageData.data; // flat array: [R, G, B, A, R, G, B, A, ...]
+
+  // For each grid cell, check if the center pixel has visible text
+  for (var row = 0; row < maskRows; row++) {
+    for (var col = 0; col < maskCols; col++) {
+      var pixelX = Math.floor(col * FONT_SIZE + FONT_SIZE / 2);
+      var pixelY = Math.floor(row * FONT_SIZE + FONT_SIZE / 2);
+      if (pixelX < hiddenCanvas.width && pixelY < hiddenCanvas.height) {
+        var alphaIndex = (pixelY * hiddenCanvas.width + pixelX) * 4 + 3;
+        textMask[row * maskCols + col] = pixels[alphaIndex] > 128 ? 1 : 0;
+      }
+    }
+  }
+}
+
+function isCellInsideText(col, row) {
+  if (!textMask) return false;
+  if (col < 0 || col >= maskCols || row < 0 || row >= maskRows) return false;
+  return textMask[row * maskCols + col] === 1;
+}
+
+// ── Fade-In Timer ─────────────────────────────────────────────
+// The "MATRIX" text gradually appears over 10 seconds
+var animationStartTime = performance.now();
+var FADE_IN_DURATION = 10000;
+
+// ── Resize Handler ────────────────────────────────────────────
+function handleResize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  buildTextMask();
+
+  var columnCount = Math.ceil(canvas.width / FONT_SIZE * columnDensity);
+
+  // Add new columns if the window got wider
+  while (columns.length < columnCount) {
+    columns.push(createColumn());
+  }
+  // Remove extra columns if the window got narrower
+  columns.length = columnCount;
+}
+
+// ── Helper ────────────────────────────────────────────────────
+function getRandomCharacter() {
+  return CHARACTERS[Math.floor(Math.random() * CHARACTERS.length)];
+}
+
+// ── Main Draw Loop ────────────────────────────────────────────
+var TRAIL_MAX_AGE = 120; // how many frames a trail character lingers
+
+function draw() {
+  // Step 1: Draw a semi-transparent black rectangle over everything.
+  //         This slowly fades out old characters, creating the trailing effect.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.02)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // How much of the "MATRIX" text is revealed (0 = hidden, 1 = fully visible)
+  var textRevealAmount = Math.min(1, (performance.now() - animationStartTime) / FADE_IN_DURATION);
+
+  // Debug mode: draw red outlines around the text mask cells
+  if (showDebugOutlines && textMask) {
+    ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+    ctx.lineWidth = 1;
+    for (var row = 0; row < maskRows; row++) {
+      for (var col = 0; col < maskCols; col++) {
+        if (textMask[row * maskCols + col]) {
+          ctx.strokeRect(col * FONT_SIZE, row * FONT_SIZE, FONT_SIZE, FONT_SIZE);
+        }
+      }
+    }
+  }
+
+  ctx.font = FONT;
+  ctx.textAlign = 'center';
+
+  // Step 2: Update and draw each column of rain
+  var columnCount = columns.length;
+  var spacing = canvas.width / columnCount;
+
+  for (var i = 0; i < columnCount; i++) {
+    var column = columns[i];
+    var gridRow = Math.floor(column.position);
+    var x = i * spacing + spacing / 2;
+
+    // Only draw a new character when the drop moves into a new grid row
+    if (gridRow !== column.lastGridRow) {
+      column.lastGridRow = gridRow;
+      var y = gridRow * FONT_SIZE;
+      var maskCol = Math.floor(x / FONT_SIZE);
+      var isOnText = isCellInsideText(maskCol, gridRow);
+
+      // Characters on the "MATRIX" text are brighter
+      var alpha = isOnText
+        ? Math.min(1, column.brightness + textRevealAmount * 0.35)
+        : column.brightness;
+
+      // Draw the falling character with a green glow
+      var character = getRandomCharacter();
+      ctx.fillStyle = 'rgba(0, 255, 0, ' + alpha + ')';
+      ctx.shadowColor = '#00ff00';
+      ctx.shadowBlur = 4;
+      ctx.fillText(character, x, y);
+      ctx.shadowBlur = 0;
+
+      // If this character landed on the "MATRIX" text, save it so it lingers
+      if (isOnText && textRevealAmount > 0) {
+        column.trail.push({ character: character, x: x, y: y, age: 0 });
+      }
+    }
+
+    // Re-draw lingering trail characters (keeps the "MATRIX" text glowing)
+    for (var t = column.trail.length - 1; t >= 0; t--) {
+      var entry = column.trail[t];
+      entry.age++;
+      if (entry.age > TRAIL_MAX_AGE) {
+        column.trail.splice(t, 1);
+        continue;
+      }
+      var fadeAmount = 1 - entry.age / TRAIL_MAX_AGE;
+      var trailAlpha = textRevealAmount * 0.15 * fadeAmount;
+      ctx.fillStyle = 'rgba(0, 255, 0, ' + trailAlpha + ')';
+      ctx.fillText(entry.character, entry.x, entry.y);
+    }
+
+    // Move the drop downward
+    column.position += column.speed;
+
+    // When a drop goes off the bottom, reset it above the screen (with random delay)
+    if (column.position * FONT_SIZE > canvas.height && Math.random() > 0.975) {
+      column.position = Math.random() * -20;
+      column.speed = 0.08 + Math.random() * 0.22;
+      column.brightness = 0.5 + Math.random() * 0.5;
+      column.lastGridRow = -999;
+    }
+  }
+
+  // Step 3: Request the next frame (unless paused)
+  if (!paused) requestAnimationFrame(draw);
+}
+
+// ── Pause/Resume with Spacebar ────────────────────────────────
+var paused = false;
+window.addEventListener('keydown', function (event) {
+  if (event.code === 'Space') {
+    event.preventDefault();
+    paused = !paused;
+    if (!paused) draw();
+  }
+});
+
+// ── Start the Animation ───────────────────────────────────────
+window.addEventListener('resize', handleResize);
+
+// Wait for the Matrix font to load before building the mask
+document.fonts.ready.then(function () {
+  handleResize();
+  draw();
+});
+</script>
+</body>
+</html>
