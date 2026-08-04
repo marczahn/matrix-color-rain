@@ -33,3 +33,8 @@ Everything else is up to you.
 ### License
 
 This project is published under the GPL V3.
+
+### Related 
+
+* https://github.com/Rezmason/matrix
+* https://rosettacode.org/wiki/Matrix_digital_rain
